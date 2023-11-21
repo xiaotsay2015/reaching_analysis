@@ -1,0 +1,267 @@
+---
+title: "Aging_further_analysis"
+author: "Elizabeth Cisneros"
+date: "2023-08-08"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(plotrix)
+library(mclust)
+library(BAMBI)
+```
+
+```{r}
+permutationanova <- function(data, conditions, nE, alphaCut, nC_out) {
+# Inputs:
+#   data: ...
+#   conditions: character vector with condition labels
+#   nE: Length of data (cycles)
+#   alphaCut: 0.05
+#   nC_out: number of clusters
+  
+  # divide data into conditions
+  if (length(conditions) == 2) {
+    condition1 <- data %>% 
+      filter(Group == conditions[1])
+    condition2 <- data %>% 
+      filter(Group == conditions[2])
+    
+    #calculate subject number for each condition
+    n1 <- length(unique(condition1$Subject.ID))
+    n2 <- length(unique(condition2$Subject.ID))
+    N <- n1 + n2
+    
+  } else if (length (conditions) == 3) {
+    condition1 <- data %>% 
+      filter(Group == conditions[1])
+    condition2 <- data %>% 
+      filter(Group == conditions[2])
+    condition3 <- data %>% 
+      filter(Group == conditions[3])
+    
+    #calculate subject number for each condition
+    n1 <- length(unique(condition1$Subject.ID))
+    n2 <- length(unique(condition2$Subject.ID))
+    n3 <- length(unique(condition3$Subject.ID))
+    N <- n1 + n2 + n3
+  }
+  
+  result <- cluster_anova_multClust(data, conditions, nE, alphaCut, nC_out)
+  extreme_tSum <- result$extreme_tSum
+  iSE_cluster_exttSum <- result$iSE_cluster_exttSum
+  nC_cand <- result$nC_cand
+  
+  tsum <- extreme_tSum
+  cluster_edge <- iSE_cluster_exttSum
+  nC <- nC_cand
+  
+  tVal <- matrix(nrow = 10000, ncol = nC)
+  
+  for (i in 1:10000) {
+    subj <- unique(data$Subject.ID)
+    
+    # Randomly shuffle participants into conditions
+    tempn <- sample(N) 
+    tempn1 <- tempn[1:n1]
+    tempn2 <- tempn[(n1 + 1):(n1 + n2)]
+    
+    TC1temp <- subj[tempn1]
+    TC2temp <- subj[tempn2]
+    TCtemp <- rbind(TC1temp, TC2temp) # list of participants and new condition mapping 
+
+    # Assign condition labels based on new mapping
+    for(si in subj) {
+      idx <- data$Subject.ID == si
+      
+      if (si %in% TC1temp) {
+        data$Perm_Group[idx] <- conditions[1]
+      
+      } else if (si %in% TC2temp) {
+        data$Perm_Group[idx] <- conditions[2]
+      }
+    } 
+    
+    for (clu in 1:nC) {
+      tV <- numeric()
+      ee <- 0
+      
+      for (e in cluster_edge[1, clu]:cluster_edge[2, clu]) {
+        ee <- ee + 1
+        Trial_data <- data %>% 
+           filter(Block_CN == e)
+        if (length(conditions) > 2) {
+            anova_result <- anova(aov(HandFlip_mean ~ Perm_Group, data = Trial_data))
+            tV[ee] <- anova_result$`F value`[1]
+        } else if (length(conditions) == 2){
+            perm_c1 <- Trial_data %>% 
+              filter(Perm_Group == conditions[1])
+            perm_c2 <- Trial_data %>% 
+              filter(Perm_Group == conditions[2])
+            t_results <- t.test(perm_c1$HandFlip_mean,perm_c2$HandFlip_mean)
+            tV[ee] <- t_results[["statistic"]][["t"]]
+        }
+      }
+      tVal[i, clu] <- sum(tV)
+    }
+  }
+  
+  m <- 0
+  realcluster <- matrix(nrow = 2, ncol = 0)
+  
+  for (clu in 1:nC) {
+      if (sum(abs(tVal[, clu]) < abs(tsum[clu]))/length(tVal[, clu]) >= 0.95) {
+          m <- m + 1
+          realcluster <- cbind(realcluster, cluster_edge[, clu])
+      }
+  }
+  
+  return(realcluster = realcluster)
+}
+```
+
+
+```{r}
+cluster_anova_multClust <- function(data, conditions, nE, alphaCut, nC_out) {
+    
+  hVal <- rep(0, nE)
+  pVal <- rep(0, nE)
+  tVal <- rep(0, nE) # should be F-stat if anova
+  
+  iSE_cluster <- matrix(nrow = 2, ncol = 0)
+  flagUpdate <- TRUE
+  countCluster <- 0
+  
+  for (e in 1:nE) {
+    Trial_data <- data %>% 
+      filter(Block_CN == e)
+    
+    if (length(conditions) > 2) {
+        anova_result <- anova(aov(HandFlip_mean ~ Group, data = Trial_data))
+        pVal[e] <- anova_result$`Pr(>F)`[1]
+        tVal[e] <- anova_result$`F value`[1]
+        
+    } else if (length(conditions) == 2){
+        condition1 <- Trial_data %>% 
+          # filter(Group == conditions[1])
+          filter(Group == conditions[1])
+        condition2 <- Trial_data %>% 
+          # filter(Group == conditions[2])
+          filter(Group == conditions[2])
+        t_results <- t.test(condition1$HandFlip_mean,condition2$HandFlip_mean)
+        pVal[e] <- t_results[["p.value"]]
+        tVal[e] <- t_results[["statistic"]][["t"]]
+    }
+    
+    if (pVal[e] < alphaCut) {
+      hVal[e] <- 1
+    } else {
+      hVal[e] <- 0
+    }
+    
+    if (hVal[e] == 1) { # if significant, start a cluster 
+      if (e < nE) { 
+        if (flagUpdate) {
+          iSE_cluster <- cbind(iSE_cluster, c(NaN, NaN))
+          flagUpdate <- FALSE
+          countCluster <- countCluster + 1
+          iSE_cluster[1, countCluster] <- e #start index of the cluster 
+        }
+      } else { 
+          if (countCluster == 0) {
+            iSE_cluster[1, 1] <- e
+            iSE_cluster[2, 1] <- e 
+          } else { 
+              if (flagUpdate) { #
+                iSE_cluster <- cbind(iSE_cluster, c(NaN, NaN))
+                flagUpdate <- FALSE
+                countCluster <- countCluster + 1
+                iSE_cluster[1, countCluster] <- e
+                iSE_cluster[2, countCluster] <- e
+              } else {
+                iSE_cluster[2, countCluster] <- e
+              }
+          }
+      }
+    } else { # if not significant end cluster 
+        if (!flagUpdate) {
+          flagUpdate <- TRUE
+          if (e < nE) {
+            iSE_cluster[2, countCluster] <- e - 1 
+          } else {
+            iSE_cluster[2, countCluster] <- e 
+          }
+        }
+    }
+  }
+  
+  nC <- ncol(iSE_cluster)
+  tSum <- rep(0, nC)
+  
+  for (c in 1:nC) {
+      tSum[c] <- sum(tVal[iSE_cluster[1, c]:iSE_cluster[2, c]])
+  }
+  
+  nC_cand <- nC - 1
+  extreme_tSum <- rep(0,nC_cand)
+  iSE_cluster_exttSum <- matrix(nrow = 2, ncol = nC_cand)
+  
+  for (cou in 1:nC_cand) {
+    if (nC_cand > 0) { # if there is any cluster, find cluster with greatest tSum 
+      max_tSum <- max(tSum)
+      icmax_tSum <- which.max(tSum)
+      min_tSum <- min(tSum)
+      icmin_tSum <- which.min(tSum)
+      
+      if (abs(max_tSum) > abs(min_tSum)) {
+        extreme_tSum[cou] <- max_tSum
+        icext_tSum <- icmax_tSum
+      } else {
+        extreme_tSum[cou] <- min_tSum
+        icext_tSum <- icmin_tSum
+      }
+      
+      iSE_cluster_exttSum[, cou] <- iSE_cluster[, icext_tSum]
+      tSum <- tSum[-icext_tSum] 
+      iSE_cluster <- iSE_cluster[, -icext_tSum] 
+    } else { # if there are no clusters
+      extreme_tSum[cou] <- 0
+      iSE_cluster_exttSum[, cou] <- c(NaN, NaN)
+    }
+  }
+  
+  return(list(extreme_tSum = extreme_tSum, iSE_cluster_exttSum = iSE_cluster_exttSum, nC_cand = nC_cand))
+}
+```
+
+```{r}
+#Load and prep data
+# all_data_tmp <- read.csv("Aging_Explicit_Trial_Data_Filtered_4Oct2023.csv") %>% 
+all_data_tmp <- read.csv('/Users/cisneroselizabeth/Dropbox/VICE/JT/IMPLICIT_PATIENT_2021/Aging_Meta_analysis/OnPoint Experiments/Clamped FB/data/Clamp_Data/Aging_Implicit_Trial_Data_5Aug2023.csv') %>% 
+  filter(Block != 1) %>% 
+  group_by(Subject.ID, CN, Group) %>%
+  dplyr::summarise(HandFlip_mean = mean(Hand_base, na.rm = TRUE)) %>% 
+  mutate(Block_CN = (CN - 10)) 
+  # filter(type == "NoBonus") %>% 
+  # filter(Group == "YA")  
+  # filter(learner == TRUE)
+```
+
+```{r}
+perm_results_tmp <- permutationanova(all_data_tmp, c("YA","OA"), 105, 0.05, 100)
+perm_results_tmp2 <- t(perm_results_tmp)
+perm_df_tmp <- as.data.frame(perm_results_tmp2)
+colnames(perm_df_tmp) <- c("Start", "End")
+
+perm_df_tmp <- perm_df_tmp %>%
+  mutate_all(~ . + 10) 
+
+all_perm_df <- perm_df_tmp
+```
+
+
+
+
+

@@ -1,0 +1,202 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+
+library(ggplot2)
+library(tidyverse)
+
+```
+
+Simulation 
+```{r}
+
+
+learning_rate <- 0.05
+retention <- 0.998
+my_motor_noise <- 15
+my_planning_noise <- 1
+
+state <- c(0)
+output <- c(0)
+rotation_size <- 45 
+
+for(ti in 1:100){
+  
+  error_signal <- 45 - state[ti]
+  next_state <- retention*state[ti] + learning_rate * error_signal + rnorm(1, mean = 0, sd = my_planning_noise)
+  output <- c(output, next_state + rnorm(1, mean = 0, sd = my_motor_noise))
+  
+  state <- c(state, next_state)
+  
+}
+
+plot(1:100, state[1:100], ylim = c(-15, 75))
+lines(1:100, output[1:100])
+
+
+```
+
+state space model function 
+```{r}
+
+# inputs 3 parameters: learning rate, retention rate, motor noise, rotation size, how many trials 
+# output learning curve 
+
+state_space <- function(learning_rate, retention, my_motor_noise, rotation_size, num_trials){
+  
+  state <- c(0)
+  output <- c(0)
+  
+  for(ti in 1:num_trials){
+    
+    error_signal <- rotation_size - state[ti]
+    next_state <- retention*state[ti] + learning_rate * error_signal
+    output <- c(output, next_state + rnorm(1, mean = 0, sd = my_motor_noise))
+    
+    state <- c(state, next_state)
+    
+  }
+  
+  return(output[1:num_trials])
+  
+}
+
+# simulate over many combinations of variables, calculate key dependent variables like 
+# early adaptation (first 10 trials), late adaptaiton (last 10 trials)
+# look at predictions 
+
+```
+
+Log likelihood function, for fitting the model
+```{r}
+
+state_space_nLL <- function(learning_rate, retention, my_motor_noise, rotation_size, num_trials, my_data){
+  
+  state <- c(0)
+  LL <- 0
+  
+  for(ti in 1:num_trials){
+    
+    error_signal <- rotation_size - state[ti]
+    next_state <- retention*state[ti] + learning_rate * error_signal
+    output <- my_data[ti]
+    
+    prob_output <- dnorm(output, mean = next_state, sd = my_motor_noise)
+    
+    state <- c(state, next_state)
+    
+    LL <- LL + log(prob_output)
+    
+    # print(log(prob_output))
+    
+  }
+  
+  
+  # spit out negative log liklihood 
+  # because we want to minimize this thing
+  
+  return(-LL)
+  
+}
+
+state_space_nLL_2 <- function(params, rotation_size, num_trials, my_data){
+  
+  learning_rate <- params[1]
+  retention <- params[2]
+  my_motor_noise <- params[3]
+  
+  state <- c(0)
+  LL <- 0
+  
+  for(ti in 1:num_trials){
+    
+    error_signal <- rotation_size - state[ti]
+    next_state <- retention*state[ti] + learning_rate * error_signal
+    output <- my_data[ti]
+    
+    prob_output <- dnorm(output, mean = next_state, sd = my_motor_noise)
+    
+    state <- c(state, next_state)
+    
+    LL <- LL + log(prob_output)
+    
+    # print(log(prob_output))
+    
+  }
+  
+  
+  # spit out negative log liklihood 
+  # because we want to minimize this thing
+  
+  return(-LL)
+  
+}
+
+# mydata <- state_space(0.03, 0.998, 5, 45, 100)
+# plot(1:100, mydata)
+
+
+```
+
+Try different parameter values 
+```{r}
+
+mydata <- state_space(0.03, 0.998, 5, 45, 100)
+learning_rate_params <- seq(0, 0.1,by = 0.005)
+retention_params <- seq(0.90, 1,by = 0.001)
+motor_noise_params <- 5 
+
+myparam_combo <- setNames( expand.grid(learning_rate_params, retention_params, motor_noise_params), c("learning_rate", "retention", "motor_noise"))
+myparam_combo$nLL <- NA
+
+for(si in 1:nrow(myparam_combo)){
+  
+  myparam_combo$nLL[si] <- state_space_nLL(myparam_combo$learning_rate[si], 
+                                           myparam_combo$retention[si], 
+                                           myparam_combo$motor_noise[si], 
+                                           rotation_size = 45, 
+                                           num_trials = 100, 
+                                           mydata)
+  
+  
+}
+
+myparam_combo %>% 
+  ggplot( aes(x = learning_rate, y = nLL, group = retention, color = factor(retention))) + 
+  geom_line() 
+
+myparam_combo[myparam_combo$nLL == min(myparam_combo$nLL), ]
+
+```
+The function that helps you search the parameter space
+to find the min LL 
+
+```{r}
+
+# optim = black box algo to do gradient descent 
+# par = starting parameters points 
+# fn = negative log likliehoo function
+# lower = lower bound of parameter setting  
+# upper = upper bound of parameter setting  
+# The rest are whatever your LL function take 
+# spits out parameter settings that minimize log likelihood 
+# and also spits out negative log likelihood. 
+
+start_param <- runif(3)
+optim(method = "L-BFGS-B",
+      par = start_param,
+      fn = state_space_nLL_2,
+      lower = rep(1e-16, length(start_param)),
+      upper = rep(1, length(start_param)),
+      rotation_size = 45,
+      num_trials = 100,
+      mydata = mydata)
+
+# my_data = vector of hand angles, between -180 and 180. collapse over 2 targets duing the learning phase (no washout, no baseline)
+# rotation size is just one size. 
+
+```
+
